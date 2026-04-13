@@ -5,7 +5,7 @@ authors = [
     { name = "Hai Duong, Tran", email = "10422021@student.vgu.edu.vn" },
     { name = "That Nhat Minh, Ton", email = "10422050@student.vgu.edu.vn" },
 ]
-description = "Lab 1 - Numpy"
+description = "Lab 2 - Pandas"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
