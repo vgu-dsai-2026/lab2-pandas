@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import sys
@@ -11,7 +12,7 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 # -----------------------------------------------------------------------------
-# CONSTANTS
+# MODULE BOOTSTRAP
 # -----------------------------------------------------------------------------
 
 NOTEBOOK_PATH = Path(__file__).resolve().parents[1] / "notebook.py"
@@ -20,537 +21,532 @@ NOTEBOOK_MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None
 SPEC.loader.exec_module(NOTEBOOK_MODULE)
 
-load_image_np = NOTEBOOK_MODULE.load_image_np
-center_crop = NOTEBOOK_MODULE.center_crop
-flip_horizontal = NOTEBOOK_MODULE.flip_horizontal
-normalize_01 = NOTEBOOK_MODULE.normalize_01
-rgb_to_gray = NOTEBOOK_MODULE.rgb_to_gray
-channel_summary = NOTEBOOK_MODULE.channel_summary
-convolve2d_matmul = NOTEBOOK_MODULE.convolve2d_matmul
-flatten_image = NOTEBOOK_MODULE.flatten_image
-extract_features = NOTEBOOK_MODULE.extract_features
-build_feature_matrix = NOTEBOOK_MODULE.build_feature_matrix
+# Public API imported from student notebook
+list_image_paths_for_group   = NOTEBOOK_MODULE.list_image_paths_for_group
+inspect_image_file           = NOTEBOOK_MODULE.inspect_image_file
+build_metadata_from_folders  = NOTEBOOK_MODULE.build_metadata_from_folders
+load_metadata_table          = NOTEBOOK_MODULE.load_metadata_table
+summarize_metadata           = NOTEBOOK_MODULE.summarize_metadata
+build_label_split_table      = NOTEBOOK_MODULE.build_label_split_table
+audit_metadata               = NOTEBOOK_MODULE.audit_metadata
+add_analysis_columns         = NOTEBOOK_MODULE.add_analysis_columns
+build_split_balance_table    = NOTEBOOK_MODULE.build_split_balance_table
+sample_balanced_by_split_and_label = NOTEBOOK_MODULE.sample_balanced_by_split_and_label
 
-TEST_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+# Safe project root (works in scripts + notebooks)
+try:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+except NameError:
+    PROJECT_ROOT = Path.cwd()
 
-GAUSSIAN_KERNEL = np.array(
-    [
-        [1, 2, 1],
-        [2, 4, 2],
-        [1, 2, 1],
-    ],
-    dtype=np.float32,
-) / 16.0
+DATA_ROOT              = PROJECT_ROOT / "data"
+GENERATED_METADATA_PATH = PROJECT_ROOT / "artifacts" / f"lab2_faces_metadata.csv"
+SEED                   = NOTEBOOK_MODULE.SEED
 
-SOBEL_Y_KERNEL = np.array(
-    [
-        [1, 2, 1],
-        [0, 0, 0],
-        [-1, -2, -1],
-    ],
-    dtype=np.float32,
-)
 
 # -----------------------------------------------------------------------------
-# Question 1: load_image_np
+# Question 1: list_image_paths_for_group  /  inspect_image_file
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("image_name", "expected_shape", "expected_min", "expected_mean", "expected_max"),
+    ("split", "label"),
     [
-        pytest.param(
-            "cat/cat_0005.jpg",
-            (64, 64, 3),
-            0,
-            115,
-            206,
-            id="cat-image-stats",
-        ),
-        pytest.param(
-            "dog/dog_0005.jpg",
-            (64, 64, 3),
-            0,
-            89,
-            255,
-            id="dog-image-stats",
-        ),
+        pytest.param("train", "cat", id="train-cat-returns-nonempty-paths"),
+        pytest.param("test",  "dog", id="test-dog-returns-nonempty-paths"),
     ],
 )
-def test_load_image_np_real_images(
-    image_name: str,
-    expected_shape: tuple,
-    expected_min: int,
-    expected_mean: int,
-    expected_max: int,
+def test_list_image_paths_for_group_nonempty(split: str, label: str) -> None:
+    paths = list_image_paths_for_group(DATA_ROOT, split, label)
+
+    print(paths)
+
+    assert isinstance(paths, list), "Result must be a list"
+    assert len(paths) > 0, f"Expected at least one image for split={split}, label={label}"
+    assert all(isinstance(p, Path) for p in paths), "Every item must be a Path"
+    assert all(p.exists() for p in paths), "Every path must exist on disk"
+    assert all(
+        p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"} for p in paths
+    ), "Every path must point to an image file"
+
+@pytest.mark.parametrize(
+    ("filepath", "expected_width", "expected_height", "expected_mean"),
+    [
+        ("test/cat/cat_0009.jpg", 64, 64, 0.657925),
+        ("test/cat/cat_0010.jpg", 64, 64, 0.454074),
+        ("test/dog/dog_0009.jpg", 64, 64, 0.274566),
+        ("test/dog/dog_0010.jpg", 64, 64, 0.537693),
+    ],
+)
+def test_inspect_image_file_exact_values(filepath, expected_width, expected_height, expected_mean):
+    path = DATA_ROOT / filepath
+
+    assert path.exists(), f"File does not exist: {path}"
+
+    width, height, mean_intensity = inspect_image_file(path)
+
+    # Exact checks for integers
+    assert width == expected_width, f"Width mismatch for {filepath}"
+    assert height == expected_height, f"Height mismatch for {filepath}"
+
+    # Approximate check for float
+    assert mean_intensity == pytest.approx(expected_mean, rel=1e-3), (
+        f"Mean intensity mismatch for {filepath}: "
+        f"expected {expected_mean}, got {mean_intensity}"
+    )
+
+# -----------------------------------------------------------------------------
+# Question 2: load_metadata_table
+# -----------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def metadata_path() -> Path:
+    GENERATED_METADATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # build_metadata_from_folders should create the CSV file
+    folder_df = build_metadata_from_folders(DATA_ROOT)
+    folder_df.to_csv(GENERATED_METADATA_PATH, index=False)
+
+
+    assert GENERATED_METADATA_PATH.exists(), (
+        f"Metadata file was not created: {GENERATED_METADATA_PATH}"
+    )
+    return GENERATED_METADATA_PATH
+
+def test_build_and_load_metadata(metadata_path: Path) -> None:
+    df = load_metadata_table(metadata_path)
+
+    assert isinstance(df, pd.DataFrame)
+    assert metadata_path.exists()
+
+    required_columns = {
+        "filepath", "label", "split",
+        "width", "height", "mean_intensity"
+    }
+    assert required_columns.issubset(df.columns)
+
+
+@pytest.mark.parametrize(
+    ("column", "expected_dtype_kind"),
+    [
+        ("width", "i"),
+        ("mean_intensity", "f"),
+    ],
+)
+def test_load_metadata_table_dtypes(metadata_path: Path, column: str, expected_dtype_kind: str):
+    df = load_metadata_table(metadata_path)
+
+    assert df[column].dtype.kind == expected_dtype_kind
+
+
+# -----------------------------------------------------------------------------
+# Question 3: summarize_metadata
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key",),
+    [
+        pytest.param("rows",         id="summary-contains-rows-key"),
+        pytest.param("columns",      id="summary-contains-columns-key"),
+        pytest.param("class_counts", id="summary-contains-class-counts-key"),
+        pytest.param("split_counts", id="summary-contains-split-counts-key"),
+    ],
+)
+def test_summarize_metadata_keys(key: str) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    summary = summarize_metadata(df)
+
+    assert isinstance(summary, dict), "Result must be a dict"
+    assert key in summary, f"Key '{key}' is missing from the summary dict"
+
+
+@pytest.mark.parametrize(
+    ("expected_labels", "expected_splits"),
+    [
+        pytest.param(
+            {"cat", "dog"},
+            {"train", "val", "test"},
+            id="class-counts-and-split-counts-cover-all-groups",
+        )
+    ],
+)
+def test_summarize_metadata_values(
+    expected_labels: set[str], expected_splits: set[str]
 ) -> None:
-    image_path = TEST_DATA_DIR / image_name
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    summary = summarize_metadata(df)
 
-    # Ensure file exists (important for CI)
-    assert image_path.exists(), f"Missing test image: {image_path}"
+    assert summary["rows"] == len(df), (
+        f"summary['rows'] is {summary['rows']} but DataFrame has {len(df)} rows"
+    )
+    assert set(summary["class_counts"].index) == expected_labels, (
+        f"class_counts index {set(summary['class_counts'].index)} != {expected_labels}"
+    )
+    assert set(summary["split_counts"].index) == expected_splits, (
+        f"split_counts index {set(summary['split_counts'].index)} != {expected_splits}"
+    )
 
-    result = load_image_np(image_path)
+def test_summarize_metadata_exact_values():
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    summary = summarize_metadata(df)
 
-    # Type & structure checks
-    assert isinstance(result, np.ndarray)
-    assert result.dtype == np.uint8
-    assert result.shape == expected_shape
+    # Class counts
+    expected_class_counts = {"cat": 10, "dog": 10}
+    actual_class_counts = summary["class_counts"].to_dict()
 
-    # Value checks
-    assert result.min() == expected_min
-    assert int(result.mean()) == expected_mean
-    assert result.max() == expected_max
+    assert actual_class_counts == expected_class_counts, (
+        f"Expected class counts {expected_class_counts}, got {actual_class_counts}"
+    )
 
+    # Split counts (total)
+    expected_split_counts = {"train": 12, "val": 4, "test": 4}
+    actual_split_counts = summary["split_counts"].to_dict()
 
-# -----------------------------------------------------------------------------
-# Question 2: center_crop
-# -----------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("image", "crop_size", "expected"),
-    [
-        pytest.param(
-            np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3),
-            4,
-            np.arange(6 * 8 * 3, dtype=np.uint8).reshape(6, 8, 3)[1:5, 2:6],
-            id="even-dimensions",
-        ),
-        pytest.param(
-            np.arange(7 * 9 * 3, dtype=np.uint8).reshape(7, 9, 3),
-            3,
-            np.arange(7 * 9 * 3, dtype=np.uint8).reshape(7, 9, 3)[2:5, 3:6],
-            id="odd-dimensions",
-        ),
-    ],
-)
-def test_center_crop(image: np.ndarray, crop_size: int, expected: np.ndarray) -> None:
-    result = center_crop(image, crop_size=crop_size)
-
-    assert result.shape == (crop_size, crop_size, 3)
-    np.testing.assert_array_equal(result, expected)
+    assert actual_split_counts == expected_split_counts, (
+        f"Expected split counts {expected_split_counts}, got {actual_split_counts}"
+    )
 
 
 # -----------------------------------------------------------------------------
-# Question 3: flip_horizontal
+# Question 4: build_label_split_table
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("image", "expected"),
+    ("expected_index", "expected_columns"),
     [
         pytest.param(
-            np.array(
-                [
-                    [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
-                    [[10, 11, 12], [13, 14, 15], [16, 17, 18]],
-                ],
-                dtype=np.uint8,
-            ),
-            np.array(
-                [
-                    [[7, 8, 9], [4, 5, 6], [1, 2, 3]],
-                    [[16, 17, 18], [13, 14, 15], [10, 11, 12]],
-                ],
-                dtype=np.uint8,
-            ),
-            id="three-column-image",
-        ),
-        pytest.param(
-            np.array(
-                [
-                    [[9, 8, 7], [6, 5, 4]],
-                    [[3, 2, 1], [0, 1, 2]],
-                    [[4, 5, 6], [7, 8, 9]],
-                ],
-                dtype=np.uint8,
-            ),
-            np.array(
-                [
-                    [[6, 5, 4], [9, 8, 7]],
-                    [[0, 1, 2], [3, 2, 1]],
-                    [[7, 8, 9], [4, 5, 6]],
-                ],
-                dtype=np.uint8,
-            ),
-            id="two-column-image",
-        ),
+            {"cat", "dog"},
+            {"train", "val", "test"},
+            id="labels-are-index-splits-are-columns",
+        )
     ],
 )
-def test_flip_horizontal(image: np.ndarray, expected: np.ndarray) -> None:
-    result = flip_horizontal(image)
+def test_build_label_split_table_structure(
+    expected_index: set[str], expected_columns: set[str]
+) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    table = build_label_split_table(df)
 
-    np.testing.assert_array_equal(result, expected)
+    assert isinstance(table, pd.DataFrame), "Result must be a DataFrame"
+    assert expected_index.issubset(set(table.index)), (
+        f"Table index {set(table.index)} must include {expected_index}"
+    )
+    assert expected_columns.issubset(set(table.columns)), (
+        f"Table columns {set(table.columns)} must include {expected_columns}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "split"),
+    [
+        pytest.param("cat", "train", id="cat-train-cell-matches-raw-count"),
+        pytest.param("dog", "test",  id="dog-test-cell-matches-raw-count"),
+    ],
+)
+def test_build_label_split_table_counts(label: str, split: str) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    table = build_label_split_table(df)
+
+    expected = int(((df["label"] == label) & (df["split"] == split)).sum())
+    actual   = int(table.loc[label, split])
+    assert actual == expected, (
+        f"table.loc['{label}', '{split}'] == {actual}, expected {expected}"
+    )
 
 
 # -----------------------------------------------------------------------------
-# Question 4: normalize_01
+# Question 5: audit_metadata
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("image", "expected"),
+    ("key",),
     [
-        pytest.param(
-            np.array([[[0, 128, 255]]], dtype=np.uint8),
-            np.array([[[0.0, 128.0 / 255.0, 1.0]]], dtype=np.float32),
-            id="basic-scaling",
-        ),
-        pytest.param(
-            np.array(
-                [
-                    [[10, 20, 30], [40, 50, 60]],
-                    [[70, 80, 90], [100, 110, 120]],
-                ],
-                dtype=np.uint8,
-            ),
-            np.array(
-                [
-                    [[10, 20, 30], [40, 50, 60]],
-                    [[70, 80, 90], [100, 110, 120]],
-                ],
-                dtype=np.float32,
-            )
-            / 255.0,
-            id="preserves-shape-and-range",
-        ),
+        pytest.param("missing_values",     id="audit-contains-missing-values-key"),
+        pytest.param("duplicate_filepaths", id="audit-contains-duplicate-filepaths-key"),
+        pytest.param("bad_labels",          id="audit-contains-bad-labels-key"),
+        pytest.param("non_positive_sizes",  id="audit-contains-non-positive-sizes-key"),
     ],
 )
-def test_normalize_01(image: np.ndarray, expected: np.ndarray) -> None:
-    result = normalize_01(image)
+def test_audit_metadata_keys(key: str) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    report = audit_metadata(df)
 
-    assert result.dtype == np.float32
-    np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
-    assert result.min() >= 0.0
-    assert result.max() <= 1.0
-
-
-# -----------------------------------------------------------------------------
-# Question 5: rgb_to_gray
-# -----------------------------------------------------------------------------
+    assert isinstance(report, dict), "Result must be a dict"
+    assert key in report, f"Key '{key}' is missing from the audit report"
 
 
 @pytest.mark.parametrize(
-    ("image_float", "expected"),
+    ("injected_label", "should_flag"),
     [
-        pytest.param(
-            np.array(
-                [
-                    [[0.25, 0.25, 0.25], [0.75, 0.75, 0.75]],
-                    [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
-                ],
-                dtype=np.float32,
-            ),
-            np.array(
-                [[0.25, 0.75], [0.0, 1.0]],
-                dtype=np.float32,
-            ),
-            id="preserves-neutral-gray",
-        ),
-        pytest.param(
-            np.array(
-                [
-                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                    [[0.0, 0.0, 1.0], [1.0, 1.0, 1.0]],
-                ],
-                dtype=np.float32,
-            ),
-            None,
-            id="green-brighter-than-red-and-blue",
-        ),
+        pytest.param("bird",  True,  id="injected-bad-label-is-flagged"),
+        pytest.param("cat",   False, id="clean-dataframe-has-no-bad-labels"),
     ],
 )
-def test_rgb_to_gray(image_float: np.ndarray, expected: np.ndarray | None) -> None:
-    result = rgb_to_gray(image_float)
+def test_audit_metadata_bad_labels(injected_label: str, should_flag: bool) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
 
-    assert result.shape == image_float.shape[:2]
-    assert np.issubdtype(result.dtype, np.floating)
-
-    if expected is not None:
-        np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+    if should_flag:
+        dirty = df.copy()
+        dirty.loc[0, "label"] = injected_label
+        report = audit_metadata(dirty)
+        assert injected_label in report["bad_labels"], (
+            f"'{injected_label}' should appear in bad_labels but got: {report['bad_labels']}"
+        )
     else:
-        assert result[0, 1] > result[0, 0] > result[1, 0]
-        assert result[1, 1] == pytest.approx(1.0, rel=1e-6, abs=1e-6)
+        report = audit_metadata(df)
+        assert report["bad_labels"] == [], (
+            f"Clean DataFrame should have no bad_labels, got: {report['bad_labels']}"
+        )
 
+def test_audit_metadata_missing_values():
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+
+    dirty = df.copy()
+    dirty.loc[0, "width"] = np.nan
+
+    report = audit_metadata(dirty)
+
+    assert report["missing_values"]["width"] > 0
+
+def test_audit_metadata_duplicate_filepaths():
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+
+    dirty = pd.concat([df, df.iloc[[0]]], ignore_index=True)
+
+    report = audit_metadata(dirty)
+
+    assert report["duplicate_filepaths"] > 0, (
+        f"Expected duplicate_filepaths > 0, got {report['duplicate_filepaths']}"
+    )
+
+def test_audit_metadata_non_positive_sizes():
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+
+    dirty = df.copy()
+    dirty.loc[0, "width"] = 0   # invalid
+    dirty.loc[1, "height"] = -1 # invalid
+
+    report = audit_metadata(dirty)
+
+    assert report["non_positive_sizes"] > 0, (
+        f"Expected non_positive_sizes > 0, got {report['non_positive_sizes']}"
+    )
 
 # -----------------------------------------------------------------------------
-# Question 6: channel_summary
+# Question 6: add_analysis_columns
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("image_float", "expected_means", "expected_brightest"),
+    ("column",),
     [
-        pytest.param(
-            np.array(
-                [
-                    [[0.0, 0.5, 1.0], [1.0, 0.5, 0.5]],
-                    [[0.5, 0.5, 0.5], [1.0, 0.0, 1.0]],
-                ],
-                dtype=np.float32,
-            ),
-            np.array([0.625, 0.375, 0.75], dtype=np.float32),
-            2,
-            id="computes-channel-means",
-        ),
-        pytest.param(
-            np.array(
-                [
-                    [[0.4, 0.1, 0.4], [0.4, 0.1, 0.4]],
-                    [[0.4, 0.1, 0.4], [0.4, 0.1, 0.4]],
-                ],
-                dtype=np.float32,
-            ),
-            np.array([0.4, 0.1, 0.4], dtype=np.float32),
-            0,
-            id="ties-pick-first-maximum",
-        ),
+        pytest.param("pixel_count",     id="pixel-count-column-added"),
+        pytest.param("aspect_ratio",    id="aspect-ratio-column-added"),
+        pytest.param("brightness_band", id="brightness-band-column-added"),
+        pytest.param("size_bucket",     id="size-bucket-column-added"),
     ],
 )
-def test_channel_summary(
-    image_float: np.ndarray, expected_means: np.ndarray, expected_brightest: int
+def test_add_analysis_columns_present(column: str) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    result = add_analysis_columns(df)
+
+    assert column in result.columns, f"Column '{column}' is missing from the result"
+
+
+def test_add_analysis_columns_exact_values():
+    df = pd.DataFrame({
+        "width": [10, 20],
+        "height": [5, 4],
+        "mean_intensity": [0.2, 0.8],
+        "label": ["cat", "dog"],
+        "split": ["train", "val"],
+        "filepath": ["a.jpg", "b.jpg"],
+    })
+
+    result = add_analysis_columns(df)
+
+    # pixel_count = width * height
+    expected_pixel = pd.Series([50, 80], name="pixel_count")
+    pd.testing.assert_series_equal(
+        result["pixel_count"].reset_index(drop=True),
+        expected_pixel,
+        check_dtype=False,
+    )
+
+    # aspect_ratio = width / height
+    expected_ratio = pd.Series([2.0, 5.0], name="aspect_ratio")
+    pd.testing.assert_series_equal(
+        result["aspect_ratio"].reset_index(drop=True),
+        expected_ratio,
+        check_dtype=False,
+    )
+
+
+# ---------------------------------------------------------------------
+# brightness_band test (controlled quantiles)
+# ---------------------------------------------------------------------
+
+def test_add_analysis_columns_brightness_band():
+    df = pd.DataFrame({
+        "width": [10] * 8,
+        "height": [10] * 8,
+        "mean_intensity": [
+            0.1, 0.2,   # dark
+            0.3, 0.4,   # dim
+            0.5, 0.6,   # bright
+            0.7, 0.8    # very_bright
+        ],
+        "label": ["cat"] * 8,
+        "split": ["train"] * 8,
+        "filepath": [f"img_{i}.jpg" for i in range(8)],
+    })
+
+    result = add_analysis_columns(df)
+
+    expected_labels = [
+        "darkest", "darkest",
+        "dim", "dim",
+        "bright", "bright",
+        "brightest", "brightest",
+    ]
+
+    actual_labels = result["brightness_band"].astype(str).tolist()
+
+    assert actual_labels == expected_labels, (
+        f"Expected {expected_labels}, got {actual_labels}"
+    )
+
+
+# ---------------------------------------------------------------------
+# size_bucket test (relative behavior, not implementation-specific)
+# ---------------------------------------------------------------------
+
+def test_add_analysis_columns_size_bucket():
+    reference = 64 * 64  # expected reference size
+
+    df = pd.DataFrame({
+        "width":  [32, 64, 128],
+        "height": [32, 64, 128],
+        "mean_intensity": [0.2, 0.5, 0.8],
+        "label": ["cat", "cat", "dog"],
+        "split": ["train", "train", "train"],
+        "filepath": ["small.jpg", "medium.jpg", "large.jpg"],
+    })
+
+    result = add_analysis_columns(df)
+
+    pixel_counts = result["pixel_count"]
+    size_bucket  = result["size_bucket"].astype(str)
+
+    # Check relative correctness instead of exact implementation
+    assert size_bucket.iloc[0] == "small", "Expected small for smaller-than-reference image"
+    assert size_bucket.iloc[1] == "medium", "Expected medium for reference-sized image"
+    assert size_bucket.iloc[2] == "large", "Expected large for larger-than-reference image"
+
+
+# -----------------------------------------------------------------------------
+# Question 7: build_split_balance_table
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("expected_index", "expected_columns"),
+    [
+        pytest.param(
+            {"train", "val", "test"},
+            {"cat", "dog"},
+            id="splits-are-index-labels-are-columns",
+        )
+    ],
+)
+def test_build_split_balance_table_structure(
+    expected_index: set[str], expected_columns: set[str]
 ) -> None:
-    means, brightest = channel_summary(image_float)
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    analysis = add_analysis_columns(df)
+    table = build_split_balance_table(analysis)
 
-    np.testing.assert_allclose(means, expected_means, rtol=1e-6, atol=1e-6)
-    assert brightest == expected_brightest
-
-
-# -----------------------------------------------------------------------------
-# Question 7: convolve2d_matmul
-# -----------------------------------------------------------------------------
-
-# -----------------------------------------------------------------------------
-# Question 7: convolve2d_matmul
-# -----------------------------------------------------------------------------
-
-TEST_IMAGE_GRAY = np.array(
-    [
-        [0, 1, 2, 3, 4],
-        [5, 6, 7, 8, 9],
-        [10, 11, 12, 13, 14],
-        [15, 16, 17, 18, 19],
-        [20, 21, 22, 23, 24],
-    ],
-    dtype=np.float32,
-)
+    assert isinstance(table, pd.DataFrame), "Result must be a DataFrame"
+    assert expected_index.issubset(set(table.index)), (
+        f"Table index {set(table.index)} must include {expected_index}"
+    )
+    assert expected_columns.issubset(set(table.columns)), (
+        f"Table columns {set(table.columns)} must include {expected_columns}"
+    )
 
 
 @pytest.mark.parametrize(
-    ("kernel", "expected"),
+    ("split", "label"),
     [
-        pytest.param(
-            GAUSSIAN_KERNEL,
-            np.array(
-                [
-                    [6.0, 7.0, 8.0],
-                    [11.0, 12.0, 13.0],
-                    [16.0, 17.0, 18.0],
-                ],
-                dtype=np.float32,
-            ),
-            id="gaussian-kernel-ramp-image",
-        ),
-        pytest.param(
-            SOBEL_Y_KERNEL,
-            np.array(
-                [
-                    [-40.0, -40.0, -40.0],
-                    [-40.0, -40.0, -40.0],
-                    [-40.0, -40.0, -40.0],
-                ],
-                dtype=np.float32,
-            ),
-            id="sobel-y-kernel-ramp-image",
-        ),
+        pytest.param("train", "cat", id="train-cat-cell-matches-raw-count"),
+        pytest.param("val",   "dog", id="val-dog-cell-matches-raw-count"),
     ],
 )
-def test_convolve2d_matmul(kernel: np.ndarray, expected: np.ndarray) -> None:
-    result = convolve2d_matmul(TEST_IMAGE_GRAY, kernel)
-    np.testing.assert_allclose(result, expected, rtol=1e-6, atol=1e-6)
+def test_build_split_balance_table_counts(split: str, label: str) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    analysis = add_analysis_columns(df)
+    table = build_split_balance_table(analysis)
+
+    expected = int(((analysis["split"] == split) & (analysis["label"] == label)).sum())
+    actual   = int(table.loc[split, label])
+    assert actual == expected, (
+        f"table.loc['{split}', '{label}'] == {actual}, expected {expected}"
+    )
+
 
 # -----------------------------------------------------------------------------
-# Question 8: flatten_image
+# Question 8: sample_balanced_by_split_and_label
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("image", "expected"),
+    ("n_per_group", "seed"),
     [
-        pytest.param(
-            np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32),
-            np.array([1, 2, 3, 4, 5, 6], dtype=np.float32),
-            id="2d-array",
-        ),
-        pytest.param(
-            np.array(
-                [
-                    [[1, 2], [3, 4]],
-                    [[5, 6], [7, 8]],
-                ],
-                dtype=np.float32,
-            ),
-            np.array([1, 2, 3, 4, 5, 6, 7, 8], dtype=np.float32),
-            id="3d-array",
-        ),
+        pytest.param(1, SEED,   id="n=1-shape-respects-small-groups"),
+        pytest.param(5, SEED, id="n=5-shape-respects-small-groups"),
     ],
 )
-def test_flatten_image(image: np.ndarray, expected: np.ndarray) -> None:
-    result = flatten_image(image)
+def test_sample_balanced_shape(n_per_group: int, seed: int) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    analysis = add_analysis_columns(df)
 
-    assert result.ndim == 1
-    np.testing.assert_array_equal(result, expected)
+    grouped = analysis.groupby(["split", "label"])
+    expected_rows = sum(min(n_per_group, len(group)) for _, group in grouped)
 
+    sampled = sample_balanced_by_split_and_label(
+        analysis, n_per_group=n_per_group, seed=seed
+    )
 
-# -----------------------------------------------------------------------------
-# Question 9: extract_features
-# -----------------------------------------------------------------------------
+    assert sampled.shape[0] == expected_rows, (
+        f"Expected {expected_rows} rows, got {sampled.shape[0]}"
+    )
+
 
 @pytest.mark.parametrize(
-    ("kernel", "channel_means", "brightest_channel", "gray", "filtered", "image_float"),
+    ("n_per_group", "seed"),
     [
-        pytest.param(
-            GAUSSIAN_KERNEL,
-            np.array([0.1, 0.2, 0.3], dtype=np.float32),
-            2,
-            np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32),
-            np.full((2, 2), 7.0, dtype=np.float32),
-            np.zeros((2, 2, 3), dtype=np.float32),
-            id="gaussian-kernel-features",
-        ),
-        pytest.param(
-            SOBEL_Y_KERNEL,
-            np.array([0.7, 0.1, 0.2], dtype=np.float32),
-            0,
-            np.array([[1.0, 1.0], [3.0, 5.0]], dtype=np.float32),
-            np.array([[1.0, -1.0], [-1.0, 1.0]], dtype=np.float32),
-            np.array(
-                [
-                    [[0.0, 0.5, 0.25], [1.0, 0.5, 0.25]],
-                    [[2.0, 0.5, 0.25], [3.0, 0.5, 0.25]],
-                ],
-                dtype=np.float32,
-            ),
-            id="sobel-kernel-features",
-        ),
+        pytest.param(1, SEED,   id="n=1-each-group-respects-limit"),
+        pytest.param(5, SEED, id="n=5-each-group-respects-limit"),
     ],
 )
-def test_extract_features_with_kernels(
-    monkeypatch: pytest.MonkeyPatch,
-    kernel: np.ndarray,
-    channel_means: np.ndarray,
-    brightest_channel: int,
-    gray: np.ndarray,
-    filtered: np.ndarray,
-    image_float: np.ndarray,
-) -> None:
-    image = np.zeros((64, 64, 3), dtype=np.uint8)
+def test_sample_balanced_per_group_counts(n_per_group: int, seed: int) -> None:
+    df = load_metadata_table(GENERATED_METADATA_PATH)
+    analysis = add_analysis_columns(df)
 
-    # Mock pipeline
-    monkeypatch.setattr(
-        NOTEBOOK_MODULE,
-        "center_crop",
-        lambda _image, crop_size=48: image_float.astype(np.uint8),
-    )
-    monkeypatch.setattr(
-        NOTEBOOK_MODULE,
-        "normalize_01",
-        lambda _image: image_float,
-    )
-    monkeypatch.setattr(
-        NOTEBOOK_MODULE,
-        "rgb_to_gray",
-        lambda _image_float: gray,
-    )
-    monkeypatch.setattr(
-        NOTEBOOK_MODULE,
-        "channel_summary",
-        lambda _image_float: (channel_means, brightest_channel),
+    sampled = sample_balanced_by_split_and_label(
+        analysis, n_per_group=n_per_group, seed=seed
     )
 
-    # 👇 Important: ensure kernel is passed correctly
-    def fake_convolve(_gray, passed_kernel):
-        assert np.array_equal(passed_kernel, kernel)
-        return filtered
+    original_sizes = analysis.groupby(["split", "label"]).size()
+    sampled_sizes  = sampled.groupby(["split", "label"]).size()
 
-    monkeypatch.setattr(
-        NOTEBOOK_MODULE,
-        "convolve2d_matmul",
-        fake_convolve,
-    )
+    for key in original_sizes.index:
+        expected = min(n_per_group, original_sizes[key])
+        actual   = sampled_sizes.get(key, 0)
 
-    result = extract_features(image, kernel)
-
-    # Basic checks
-    assert result.dtype == np.float32
-    assert result.shape == (10,)
-
-    # Expected computation
-    channel_stds = image_float.std(axis=(0, 1)).astype(np.float32)
-    row_std_mean = np.apply_along_axis(np.std, 1, gray).mean().astype(np.float32)
-
-    expected_vector = np.concatenate(
-        [
-            channel_means,
-            channel_stds,
-            np.array(
-                [
-                    float(brightest_channel),
-                    float(filtered.mean()),
-                    float(filtered.std()),
-                    float(row_std_mean),
-                ],
-                dtype=np.float32,
-            ),
-        ]
-    ).astype(np.float32)
-
-    np.testing.assert_allclose(result, expected_vector, rtol=1e-6, atol=1e-6)
-
-# -----------------------------------------------------------------------------
-# Question 10: build_feature_matrix
-# -----------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    ("image_names", "kernel", "expected_labels"),
-    [
-        pytest.param(
-            ["cat/cat_0005.jpg", "dog/dog_0005.jpg"],
-            GAUSSIAN_KERNEL,
-            np.array([0, 1], dtype=np.int64),
-            id="cat-dog-gaussian",
-        ),
-        pytest.param(
-            ["dog/dog_0005.jpg", "cat/cat_0005.jpg"],
-            SOBEL_Y_KERNEL,
-            np.array([1, 0], dtype=np.int64),
-            id="dog-cat-sobel",
-        ),
-    ],
-)
-def test_build_feature_matrix(
-    monkeypatch: pytest.MonkeyPatch,
-    image_names: list[str],
-    kernel: np.ndarray,
-    expected_labels: np.ndarray,
-) -> None:
-    paths = [TEST_DATA_DIR / name for name in image_names]
-
-    for path in paths:
-        assert path.exists(), f"Missing test image: {path}"
-
-    def fake_extract_features(image: np.ndarray, passed_kernel: np.ndarray) -> np.ndarray:
-        assert np.array_equal(passed_kernel, kernel)
-        value = float(image[0, 0, 0])
-        return np.array([value, value + 0.5], dtype=np.float32)
-
-    monkeypatch.setattr(NOTEBOOK_MODULE, "extract_features", fake_extract_features)
-
-    X, y = build_feature_matrix(paths, kernel)
-
-    assert X.shape == (len(paths), 2)
-    assert y.shape == (len(paths),)
-    np.testing.assert_array_equal(y, expected_labels)
-
-    # Since the test images are different, the first pixel values should differ too.
-    assert X[0, 0] != X[1, 0]
+        assert actual == expected, (
+            f"{key}: expected {expected}, got {actual}"
+        )
