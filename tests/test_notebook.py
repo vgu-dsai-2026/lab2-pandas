@@ -30,7 +30,7 @@ summarize_metadata           = NOTEBOOK_MODULE.summarize_metadata
 build_label_split_table      = NOTEBOOK_MODULE.build_label_split_table
 audit_metadata               = NOTEBOOK_MODULE.audit_metadata
 add_analysis_columns         = NOTEBOOK_MODULE.add_analysis_columns
-build_split_balance_table    = NOTEBOOK_MODULE.build_split_balance_table
+build_split_characteristics_table = NOTEBOOK_MODULE.build_split_characteristics_table
 sample_balanced_by_split_and_label = NOTEBOOK_MODULE.sample_balanced_by_split_and_label
 
 # Safe project root (works in scripts + notebooks)
@@ -448,7 +448,7 @@ def test_add_analysis_columns_size_bucket():
 
 
 # -----------------------------------------------------------------------------
-# Question 7: build_split_balance_table
+# Question 7: build_split_characteristics_table
 # -----------------------------------------------------------------------------
 
 
@@ -457,17 +457,17 @@ def test_add_analysis_columns_size_bucket():
     [
         pytest.param(
             {"train", "val", "test"},
-            {"cat", "dog"},
-            id="splits-are-index-labels-are-columns",
+            {"width", "height", "pixel_count", "mean_intensity"},
+            id="splits-are-index-numeric-summary-columns",
         )
     ],
 )
-def test_build_split_balance_table_structure(
+def test_build_split_characteristics_table_structure(
     expected_index: set[str], expected_columns: set[str]
 ) -> None:
     df = load_metadata_table(GENERATED_METADATA_PATH)
     analysis = add_analysis_columns(df)
-    table = build_split_balance_table(analysis)
+    table = build_split_characteristics_table(analysis)
 
     assert isinstance(table, pd.DataFrame), "Result must be a DataFrame"
     assert expected_index.issubset(set(table.index)), (
@@ -479,21 +479,21 @@ def test_build_split_balance_table_structure(
 
 
 @pytest.mark.parametrize(
-    ("split", "label"),
+    ("split", "column"),
     [
-        pytest.param("train", "cat", id="train-cat-cell-matches-raw-count"),
-        pytest.param("val",   "dog", id="val-dog-cell-matches-raw-count"),
+        pytest.param("train", "width", id="train-width-mean-matches-groupby-result"),
+        pytest.param("val", "mean_intensity", id="val-brightness-mean-matches-groupby-result"),
     ],
 )
-def test_build_split_balance_table_counts(split: str, label: str) -> None:
+def test_build_split_characteristics_table_values(split: str, column: str) -> None:
     df = load_metadata_table(GENERATED_METADATA_PATH)
     analysis = add_analysis_columns(df)
-    table = build_split_balance_table(analysis)
+    table = build_split_characteristics_table(analysis)
 
-    expected = int(((analysis["split"] == split) & (analysis["label"] == label)).sum())
-    actual   = int(table.loc[split, label])
-    assert actual == expected, (
-        f"table.loc['{split}', '{label}'] == {actual}, expected {expected}"
+    expected = analysis.groupby("split")[["width", "height", "pixel_count", "mean_intensity"]].mean().round(2)
+    actual = float(table.loc[split, column])
+    assert actual == pytest.approx(float(expected.loc[split, column]), rel=1e-6), (
+        f"table.loc['{split}', '{column}'] == {actual}, expected {expected.loc[split, column]}"
     )
 
 
