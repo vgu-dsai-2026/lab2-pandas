@@ -457,7 +457,7 @@ def test_add_analysis_columns_size_bucket():
     [
         pytest.param(
             {"train", "val", "test"},
-            {"width", "height", "pixel_count", "mean_intensity"},
+            {"avg_width", "avg_height", "avg_pixel_count", "avg_mean_intensity"},
             id="splits-are-index-numeric-summary-columns",
         )
     ],
@@ -481,8 +481,8 @@ def test_build_split_characteristics_table_structure(
 @pytest.mark.parametrize(
     ("split", "column"),
     [
-        pytest.param("train", "width", id="train-width-mean-matches-groupby-result"),
-        pytest.param("val", "mean_intensity", id="val-brightness-mean-matches-groupby-result"),
+        pytest.param("train", "avg_width", id="train-width-mean-matches-groupby-result"),
+        pytest.param("val", "avg_mean_intensity", id="val-brightness-mean-matches-groupby-result"),
     ],
 )
 def test_build_split_characteristics_table_values(split: str, column: str) -> None:
@@ -490,7 +490,18 @@ def test_build_split_characteristics_table_values(split: str, column: str) -> No
     analysis = add_analysis_columns(df)
     table = build_split_characteristics_table(analysis)
 
-    expected = analysis.groupby("split")[["width", "height", "pixel_count", "mean_intensity"]].mean().round(2)
+    expected = (
+        analysis.groupby("split")[["width", "height", "pixel_count", "mean_intensity"]]
+        .mean()
+        .rename(
+            columns={
+                "width": "avg_width",
+                "height": "avg_height",
+                "pixel_count": "avg_pixel_count",
+                "mean_intensity": "avg_mean_intensity",
+            }
+        )
+    )
     actual = float(table.loc[split, column])
     assert actual == pytest.approx(float(expected.loc[split, column]), rel=1e-6), (
         f"table.loc['{split}', '{column}'] == {actual}, expected {expected.loc[split, column]}"
